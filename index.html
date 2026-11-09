@@ -70,7 +70,7 @@ input[type=text]{font:1rem var(--body);padding:10px;border:1.5px solid var(--lin
   <ol class="steps" id="steps">
     <li id="s1" class="on">Escolha o PDF (por exemplo o Termo de Quitação).</li>
     <li id="s2">Faça sua assinatura com o dedo.</li>
-    <li id="s3">Toque na linha onde vai a assinatura. Dá pra arrastar depois.</li>
+    <li id="s3">A assinatura vai para a linha certa (no Termo é automático). Dá pra arrastar se precisar.</li>
     <li id="s4">Salve o PDF assinado e envie para a empresa.</li>
   </ol>
 
@@ -83,12 +83,14 @@ input[type=text]{font:1rem var(--body);padding:10px;border:1.5px solid var(--lin
     </div>
     <p class="muted">Se o PDF não aparecer: abra o PDF no WhatsApp, toque em Compartilhar e salve em Downloads ou Arquivos.</p>
     <p class="err" id="pickErr" hidden></p>
+    <p class="err" id="signedWarn" hidden>Esse arquivo parece já assinado. Escolha o Termo ORIGINAL (o que não tem “assinado” no nome).</p>
   </section>
 
   <section class="card" id="work" hidden>
     <div class="row">
       <button class="btn" id="sigBtn" type="button">✍️ Fazer assinatura</button>
       <button class="btn" id="dateBtn" type="button">Adicionar data</button>
+      <button class="btn" id="termoBtn" type="button" hidden>Colocar na linha 151</button>
     </div>
     <div class="row" id="pageNav" hidden>
       <button class="btn" id="prev" type="button">‹</button>
@@ -134,6 +136,18 @@ input[type=text]{font:1rem var(--body);padding:10px;border:1.5px solid var(--lin
   </div>
 </div>
 
+<div class="dialog" id="confirmDialog" hidden>
+  <div class="card">
+    <strong>Confira: é assim que o documento vai ficar</strong>
+    <p class="muted">A assinatura está em cima da linha certa?</p>
+    <div class="viewer" style="max-height:55vh"><img id="confirmImg" alt="Documento assinado" style="width:100%;display:block"></div>
+    <div class="row" style="justify-content:space-between">
+      <button class="btn" id="confirmNo" type="button">Não, ajustar</button>
+      <button class="btn primary" id="confirmYes" type="button">Sim, salvar</button>
+    </div>
+  </div>
+</div>
+
 <div class="dialog" id="dateDialog" hidden>
   <div class="card">
     <strong>Texto da data</strong>
@@ -152,7 +166,9 @@ input[type=text]{font:1rem var(--body);padding:10px;border:1.5px solid var(--lin
 (() => {
   const $ = id => document.getElementById(id);
   const S = { bytes:null, name:"documento.pdf", doc:null, page:0, pages:0, scale:1, zoom:1,
-              viewport:null, sigPng:null, sigRatio:0.35, pending:null, items:[] };
+              viewport:null, sigPng:null, sigRatio:0.35, pending:null, items:[], termo:false };
+  // Termo de Quitação (A4, 1 page): line 151 "Assinatura do Trabalhador" runs x 26..253 pt at y = 396 pt (measured).
+  const TERMO_LINE = { x0:26, x1:253, y:396 };
   // pdf.js uses the already-loaded worker script on the main thread (no cross-origin Worker needed)
   if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
@@ -169,6 +185,10 @@ input[type=text]{font:1rem var(--body);padding:10px;border:1.5px solid var(--lin
       S.pages = S.doc.numPages; S.page = 0; S.items = [];
       $("fileName").textContent = S.name; $("work").hidden = false; $("result").hidden = true;
       $("pageNav").hidden = S.pages < 2;
+      const pg1 = await S.doc.getPage(1); const v1 = pg1.getViewport({scale:1});
+      S.termo = S.pages === 1 && Math.abs(v1.width-595.3) < 3 && Math.abs(v1.height-841.9) < 3 && /termo|quita/i.test(S.name);
+      $("signedWarn").hidden = !/assinad/i.test(S.name);
+      $("termoBtn").hidden = !(S.pages === 1 && Math.abs(v1.width-595.3) < 3);
       await render(); step(2); hint("Toque em “Fazer assinatura”."); status("Arquivo aberto"); refresh();
     }catch(err){ $("pickErr").textContent = "Não consegui abrir esse arquivo. Confira se é um PDF e tente de novo."; $("pickErr").hidden=false; }
   });
@@ -262,13 +282,26 @@ input[type=text]{font:1rem var(--body);padding:10px;border:1.5px solid var(--lin
     const m=6; x0=Math.max(0,x0-m); y0=Math.max(0,y0-m); x1=Math.min(w-1,x1+m); y1=Math.min(h-1,y1+m);
     const c=document.createElement("canvas"); c.width=x1-x0+1; c.height=y1-y0+1; c.getContext("2d").drawImage(pad,x0,y0,c.width,c.height,0,0,c.width,c.height);
     S.sigPng=c.toDataURL("image/png"); S.sigRatio=c.height/c.width; S.pending="sig";
-    $("sigDialog").hidden=true; step(3); hint("Agora toque na linha onde vai a assinatura (no Termo: “151 Assinatura do Trabalhador”).");
+    $("sigDialog").hidden=true;
+    if(S.termo){ placeOnTermo(); }
+    else { step(3); hint("Agora toque na linha onde vai a assinatura."); }
   };
 
   // ---- date text
   $("dateBtn").onclick=()=>{ const d=new Date(); $("dateText").value=String(d.getDate()).padStart(2,"0")+"/"+String(d.getMonth()+1).padStart(2,"0")+"/"+d.getFullYear(); $("dateDialog").hidden=false; };
   $("dateCancel").onclick=()=>{ $("dateDialog").hidden=true; };
   $("dateOk").onclick=()=>{ const t=$("dateText").value.trim(); if(!t) return; S.pending={text:t}; $("dateDialog").hidden=true; hint("Toque no lugar onde vai a data."); };
+
+  function placeOnTermo(){
+    if(!S.sigPng){ hint("Primeiro toque em “Fazer assinatura”."); return; }
+    S.items = S.items.filter(i=>i.type!=="sig");
+    let w = 150; if(w*S.sigRatio > 48) w = 48/S.sigRatio;           // keep it between line 150 and line 151
+    const cx = (TERMO_LINE.x0+TERMO_LINE.x1)/2;
+    S.items.push({type:"sig",page:0,x:cx-w/2,y:TERMO_LINE.y-4,w,ratio:S.sigRatio,png:S.sigPng});
+    S.pending=null; $("size").value=Math.round(w); S.page=0; render(); step(4); refresh();
+    hint("Pronto: coloquei a assinatura na linha 151 (Assinatura do Trabalhador). Toque em “Salvar PDF assinado”.");
+  }
+  $("termoBtn").onclick = placeOnTermo;
 
   function refresh(){ $("saveBtn").disabled = !S.items.some(i=>i.type==="sig"); if(S.items.some(i=>i.type==="sig")) status("Pronto para salvar"); }
 
@@ -299,9 +332,25 @@ input[type=text]{font:1rem var(--body);padding:10px;border:1.5px solid var(--lin
     }
     return out.toDataURL("image/png");
   }
+  let built=null;
+  async function renderBuilt(bytes){
+    const d = await pdfjsLib.getDocument({data:bytes.slice()}).promise;
+    const pi = S.items.find(i=>i.type==="sig")?.page || 0;
+    const pg = await d.getPage(pi+1); const vp = pg.getViewport({scale:2});
+    const c = document.createElement("canvas"); c.width=vp.width; c.height=vp.height;
+    await pg.render({canvasContext:c.getContext("2d"), viewport:vp}).promise;
+    return c.toDataURL("image/png");
+  }
   $("saveBtn").onclick = async ()=>{
     $("saveBtn").disabled=true; status("Gerando o PDF…");
-    let bytes; try{ bytes = await build(); }catch(e){ status("Erro ao gerar o PDF. Tente de novo."); $("saveBtn").disabled=false; return; }
+    try{ built = await build(); $("confirmImg").src = await renderBuilt(built); }
+    catch(e){ status("Erro ao gerar o PDF. Tente de novo."); $("saveBtn").disabled=false; return; }
+    $("confirmDialog").hidden=false; status("Confira o documento");
+  };
+  $("confirmNo").onclick = ()=>{ $("confirmDialog").hidden=true; $("saveBtn").disabled=false;
+    hint(S.termo ? "Arraste a assinatura com o dedo até a linha, ou toque em “Colocar na linha 151”." : "Arraste a assinatura com o dedo até a linha certa."); status("Ajuste e salve de novo"); };
+  $("confirmYes").onclick = async ()=>{
+    $("confirmDialog").hidden=true; const bytes = built;
     const fname = S.name.replace(/\.pdf$/i,"") + "_assinado.pdf";
     let saved=false;
     const blob = new Blob([bytes],{type:"application/pdf"});
